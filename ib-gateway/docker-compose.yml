@@ -1,0 +1,22 @@
+services:
+  ib-gateway:
+    image: ghcr.io/gnzsnz/ib-gateway:stable
+    restart: unless-stopped
+    environment:
+      TWS_USERID: ${TWS_USERID}
+      TWS_PASSWORD: ${TWS_PASSWORD}
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      TWS_SETTINGS_PATH: ""
+      READ_ONLY_API: "no"
+      VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-changeme}
+    ports:
+      - "127.0.0.1:4003:4003"
+      - "127.0.0.1:4004:4004"
+      - "127.0.0.1:5900:5900"
+    volumes:
+      - ib-gateway-data:/home/ibgateway/Jts
+      - ib-gateway-settings:/home/ibgateway/ibc
+
+volumes:
+  ib-gateway-data:
+  ib-gateway-settings:
