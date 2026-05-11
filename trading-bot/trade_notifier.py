@@ -35,22 +35,62 @@ def _tor_get(url, retries=2):
     return None
 
 def get_market_sentiment(symbol):
-    """Fetch Reddit posts via Tor, fall back to Google News RSS."""
-    reddit_url = f'https://www.reddit.com/r/options/search/?q={symbol}&sort=new'
+    """
+    Pull signal from three sources via Tor:
+      1. r/wallstreetbets DD posts
+      2. r/options recent posts
+      3. Google News RSS fallback
+    Returns (sources_list, context_text, reddit_url).
+    """
+    reddit_url = f'https://www.reddit.com/r/wallstreetbets/search/?q={symbol}&sort=new'
+    sources = []
+    items = []
 
+    # WSB DD posts
     try:
         r = _tor_get(
-            f'https://www.reddit.com/r/options/search.json'
-            f'?q={symbol}&sort=new&limit=5&t=week')
+            f'https://www.reddit.com/r/wallstreetbets/search.json'
+            f'?q={symbol}+flair%3ADD&restrict_sr=1&sort=new&t=month&limit=3')
         if r:
-            posts = r.json()['data']['children']
-            titles = [p['data']['title'] for p in posts[:5]]
-            text = ' | '.join(titles) if titles else 'No Reddit posts found'
-            return text, reddit_url
+            for p in r.json()['data']['children']:
+                d = p['data']
+                items.append(f'[WSB DD] {d["title"]}')
+                sources.append(f'WSB DD: {d["title"][:80]} — https://reddit.com{d["permalink"]}')
     except Exception:
         pass
 
-    # Fallback: Google News RSS (always works from OCI)
+    # r/options recent
+    try:
+        r = _tor_get(
+            f'https://www.reddit.com/r/options/search.json'
+            f'?q={symbol}&restrict_sr=1&sort=new&t=week&limit=4')
+        if r:
+            for p in r.json()['data']['children']:
+                d = p['data']
+                items.append(f'[r/options] {d["title"]}')
+                sources.append(f'r/options: {d["title"][:80]} — https://reddit.com{d["permalink"]}')
+    except Exception:
+        pass
+
+    # WSB general search
+    try:
+        r = _tor_get(
+            f'https://www.reddit.com/r/wallstreetbets/search.json'
+            f'?q={symbol}&restrict_sr=1&sort=new&t=week&limit=3')
+        if r:
+            for p in r.json()['data']['children']:
+                d = p['data']
+                title = f'[WSB] {d["title"]}'
+                if title not in items:
+                    items.append(title)
+                    sources.append(f'WSB: {d["title"][:80]} — https://reddit.com{d["permalink"]}')
+    except Exception:
+        pass
+
+    if items:
+        return sources, ' | '.join(items), reddit_url
+
+    # Fallback: Google News RSS
     try:
         import xml.etree.ElementTree as ET
         url = (f'https://news.google.com/rss/search'
@@ -58,25 +98,31 @@ def get_market_sentiment(symbol):
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         r = urllib.request.urlopen(req, timeout=8).read()
         root = ET.fromstring(r)
-        titles = [i.find('title').text for i in root.findall('.//item')[:3]]
-        text = ' | '.join(titles) if titles else 'No news found'
-        return text, reddit_url
+        news_items = root.findall('.//item')[:4]
+        titles = [i.find('title').text for i in news_items]
+        links  = [i.find('link').text  for i in news_items]
+        sources = [f'Google News: {t[:80]} — {l}' for t, l in zip(titles, links)]
+        text = ' | '.join(titles)
+        return sources, text, reddit_url
     except Exception:
-        return 'News unavailable', reddit_url
+        return ['No sources available'], 'News unavailable', reddit_url
 
 def groq_analyse(symbol, action, qty, price, context=''):
     prompt = (
-        f'You are a concise trading assistant. Analyse this paper trade.\n'
-        f'Trade: {action} {qty} {symbol} @ USD {price}\n'
-        f'Context: {context or "none"}\n\n'
-        f'Reply in exactly 2 lines:\n'
-        f'Line 1: one-sentence market analysis\n'
-        f'Line 2: APPROVE or REJECT with reason under 10 words'
+        f'You are a trading analyst reviewing a paper options trade.\n'
+        f'Trade: {action} {qty} {symbol} call option @ USD {price} total premium\n\n'
+        f'Community sentiment and news:\n{context or "No context available"}\n\n'
+        f'Write a structured analysis with these sections:\n'
+        f'SENTIMENT: one sentence on overall market mood\n'
+        f'RISK: one sentence on key risk factors\n'
+        f'CATALYST: one sentence on what could move the stock\n'
+        f'VERDICT: APPROVE or REJECT with a reason under 12 words\n\n'
+        f'Be direct and concise. No bullet points, just the four labelled lines.'
     )
     data = json.dumps({
         'model': 'llama-3.3-70b-versatile',
         'messages': [{'role': 'user', 'content': prompt}],
-        'max_tokens': 80
+        'max_tokens': 200
     }).encode()
     req = urllib.request.Request(
         'https://api.groq.com/openai/v1/chat/completions', data=data,
@@ -86,9 +132,29 @@ def groq_analyse(symbol, action, qty, price, context=''):
     r = json.loads(urllib.request.urlopen(req).read())
     return r['choices'][0]['message']['content'].strip()
 
-def send_approval_request(symbol, action, qty, price, analysis, reddit_url=''):
+def _post_report(order_id, symbol, action, qty, price, analysis, sources):
+    payload = json.dumps({
+        'symbol': symbol, 'action': action, 'qty': qty, 'price': price,
+        'analysis': analysis, 'sources': sources, 'ts': time.time()
+    }).encode()
+    req = urllib.request.Request(
+        f'{WEBHOOK_URL}/report/{order_id}', data=payload,
+        headers={'Content-Type': 'application/json'})
+    req.get_method = lambda: 'POST'
+    urllib.request.urlopen(req)
+
+def send_approval_request(symbol, action, qty, price, analysis, sources, reddit_url=''):
     order_id = f'{symbol}_{int(time.time())}'
-    message = f'{action} {qty} {symbol} @ USD {price}\n\n{analysis}'
+
+    # Store full report on webhook server
+    _post_report(order_id, symbol, action, qty, price, analysis, sources)
+
+    # Extract verdict line for notification body
+    verdict_line = next(
+        (l for l in analysis.splitlines() if l.startswith('VERDICT:')),
+        analysis.splitlines()[-1] if analysis else '')
+    message = f'{action} {qty} {symbol} @ USD {price}\n\n{verdict_line}'
+
     payload = {
         'topic': NTFY_TOPIC,
         'title': 'Trade Approval Required',
@@ -96,8 +162,8 @@ def send_approval_request(symbol, action, qty, price, analysis, reddit_url=''):
         'priority': 4,
         'tags': ['chart_with_upwards_trend'],
         'actions': [
-            {'action': 'view', 'label': 'Reddit Source',
-             'url': reddit_url or f'https://www.reddit.com/r/options/search/?q={symbol}',
+            {'action': 'view', 'label': 'View Report',
+             'url': f'{WEBHOOK_URL}/report/{order_id}',
              'clear': False},
             {'action': 'http', 'label': 'Approve',
              'url': f'{WEBHOOK_URL}/approve/{order_id}',
@@ -132,13 +198,13 @@ def wait_for_decision(order_id, timeout=TIMEOUT_SEC):
     return 'timeout'
 
 def request_approval(symbol, action, qty, price):
-    print(f'Fetching sentiment for {symbol} (Tor/Reddit with Google News fallback)...')
-    context, reddit_url = get_market_sentiment(symbol)
-    print(f'Context: {context[:120]}')
+    print(f'Fetching sentiment for {symbol} (WSB DD + r/options + Google News fallback)...')
+    sources, context, reddit_url = get_market_sentiment(symbol)
+    print(f'Sources found: {len(sources)}')
     print('Running Groq analysis...')
     analysis = groq_analyse(symbol, action, qty, price, context)
     print(f'Analysis:\n{analysis}')
-    order_id = send_approval_request(symbol, action, qty, price, analysis, reddit_url)
+    order_id = send_approval_request(symbol, action, qty, price, analysis, sources, reddit_url)
     print('Notification sent. Waiting for your approval...')
     decision = wait_for_decision(order_id)
     print(f'Decision: {decision}')

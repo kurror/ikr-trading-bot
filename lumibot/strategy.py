@@ -25,37 +25,75 @@ class LongCallStrategy(Strategy):
     def initialize(self):
         self.sleeptime = '1D'
 
+    def _spot_price(self, symbol):
+        """Get spot price from IB (delayed ok), fall back to Yahoo Finance."""
+        try:
+            self.broker.ib.reqMarketDataType(3)  # 3 = delayed
+        except Exception:
+            pass
+        price = self.get_last_price(Asset(symbol=symbol, asset_type='stock'))
+        if price and price == price:  # not None, not NaN
+            return price
+        # Fallback: Yahoo Finance (no subscription needed)
+        try:
+            import urllib.request, json
+            url = f'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d'
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            data = json.loads(urllib.request.urlopen(req, timeout=8).read())
+            return data['chart']['result'][0]['meta']['regularMarketPrice']
+        except Exception:
+            return None
+
     def _pick_call(self, underlying):
-        """Find a slightly OTM call with ~TARGET_DTE days to expiry."""
-        spot = self.get_last_price(underlying)
+        """Find a slightly OTM call with ~TARGET_DTE days to expiry using yfinance chain."""
+        spot = self._spot_price(underlying.symbol)
         if not spot:
-            self.log_message('Cannot get spot price.')
-            return None, None, None
+            self.log_message('Cannot get spot price from IB or Yahoo Finance.')
+            return None, None, None, None
 
-        target_date = date.today() + timedelta(days=TARGET_DTE)
-        expiry = self.get_option_expiration_after_date(target_date)
-        if not expiry:
-            self.log_message('No expiry found.')
-            return None, None, None
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(underlying.symbol)
+            expiry_dates = ticker.options  # sorted list of 'YYYY-MM-DD' strings
+        except Exception as e:
+            self.log_message(f'Cannot fetch option expiries from yfinance: {e}')
+            return None, None, None, None
 
-        strikes = self.get_strikes(underlying)
-        if not strikes:
-            self.log_message('No strikes returned.')
-            return None, None, None
+        if not expiry_dates:
+            self.log_message('No option expiries returned.')
+            return None, None, None, None
 
-        # Pick the first strike >= spot (ATM or slightly OTM)
-        otm_strikes = sorted(s for s in strikes if s >= spot)
-        if not otm_strikes:
-            self.log_message('No OTM strikes available.')
-            return None, None, None
+        target = (date.today() + timedelta(days=TARGET_DTE)).isoformat()
+        future = [e for e in expiry_dates if e >= target]
+        if not future:
+            self.log_message('No expiry found beyond target DTE.')
+            return None, None, None, None
+        expiry_str = future[0]
+        expiry = date.fromisoformat(expiry_str)
 
-        strike = otm_strikes[0]
-        return expiry, strike, spot
+        try:
+            chain = ticker.option_chain(expiry_str)
+            calls = chain.calls
+        except Exception as e:
+            self.log_message(f'Cannot fetch call chain for {expiry_str}: {e}')
+            return None, None, None, None
+
+        otm_calls = calls[calls['strike'] >= spot].sort_values('strike')
+        if otm_calls.empty:
+            self.log_message('No OTM calls available.')
+            return None, None, None, None
+
+        row = otm_calls.iloc[0]
+        strike = float(row['strike'])
+        # Use mid-price if bid/ask available, else lastPrice
+        bid, ask = float(row.get('bid', 0)), float(row.get('ask', 0))
+        premium = round((bid + ask) / 2 if bid and ask else float(row['lastPrice']), 2)
+        return expiry, strike, spot, premium
 
     def on_trading_iteration(self):
         underlying = Asset(symbol=self.parameters['symbol'], asset_type='stock')
 
-        expiry, strike, spot = self._pick_call(underlying)
+        expiry, strike, spot, premium = self._pick_call(underlying)
         if not expiry:
             return
 
@@ -73,11 +111,6 @@ class LongCallStrategy(Strategy):
             self.log_message(f'Already holding {call}. Skipping.')
             return
 
-        # Estimate cost: use last price × 100 (one contract)
-        premium = self.get_last_price(call)
-        if not premium:
-            self.log_message('Cannot price the call contract. Skipping.')
-            return
         cost = round(premium * 100, 2)
 
         # Budget check: total open option value vs cap
