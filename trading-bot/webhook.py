@@ -16,6 +16,8 @@ def save(data):
 @app.post('/approve/{order_id}')
 async def approve(order_id: str):
     data = load()
+    if order_id in data:
+        return JSONResponse({'status': 'already_decided', 'decision': data[order_id]['decision']}, status_code=409)
     data[order_id] = {'decision': 'approved', 'ts': time.time()}
     save(data)
     return JSONResponse({'status': 'approved', 'order': order_id})
@@ -23,6 +25,8 @@ async def approve(order_id: str):
 @app.post('/reject/{order_id}')
 async def reject(order_id: str):
     data = load()
+    if order_id in data:
+        return JSONResponse({'status': 'already_decided', 'decision': data[order_id]['decision']}, status_code=409)
     data[order_id] = {'decision': 'rejected', 'ts': time.time()}
     save(data)
     return JSONResponse({'status': 'rejected', 'order': order_id})
