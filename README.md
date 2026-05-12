@@ -15,6 +15,7 @@ Automated paper-trading system for options on Interactive Brokers. Runs headless
 - [Services](#services)
 - [Configuration](#configuration)
 - [Usage](#usage)
+- [Development](#development)
 - [Known Issues](#known-issues)
 - [Roadmap](#roadmap)
 
@@ -314,6 +315,59 @@ ib.connect('127.0.0.1', 4004, clientId=99)
 print(ib.positions())
 ib.disconnect()
 "
+```
+
+---
+
+## Development
+
+### Project layout
+
+```
+ikr/
+├─ lumibot/            Dockerfile + strategy.py (Python 3.11, runs in Docker)
+├─ trading-bot/        trade_notifier.py + webhook.py (FastAPI service)
+├─ tests/              pytest suite for the webhook server
+├─ ib-gateway/         docker-compose.yml for IB Gateway container
+├─ ntfy/               docker-compose.yml for ntfy push notification server
+├─ pyproject.toml      project metadata + pytest config + dev dependencies
+└─ Makefile            convenience targets: install · test · lint · clean
+```
+
+### Running tests locally
+
+Requires Python 3.11+.
+
+```bash
+# First time: create venv and install dev dependencies
+make install
+
+# Run the full test suite
+make test
+
+# Check syntax of all Python files
+make lint
+```
+
+Or without Make:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/pytest
+```
+
+Tests use `pytest` with `FastAPI`'s `TestClient` (backed by `httpx`). Each test runs in isolation — an `autouse` fixture in `conftest.py` redirects the JSON storage files to a temporary directory.
+
+### Adding tests
+
+Tests live in `tests/test_webhook.py`. Import the app via the `trading_bot` symlink:
+
+```python
+from fastapi.testclient import TestClient
+import trading_bot.webhook as wh
+
+client = TestClient(wh.app)
 ```
 
 ---

@@ -1,0 +1,22 @@
+[project]
+name = "ikr-trading-bot"
+version = "0.1.0"
+description = "Paper-trading options bot: IB Gateway + Lumibot + Groq AI + ntfy push approval"
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "MIT" }
+
+[project.optional-dependencies]
+dev = [
+    "fastapi>=0.136.0",
+    "httpx>=0.28.0",
+    "pytest>=9.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"

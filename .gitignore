@@ -11,7 +11,23 @@
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+
+# Test & coverage
+.pytest_cache/
+.coverage
+htmlcov/
 
 # Docker volumes / runtime data
 *.db
 /tmp/
+
+# IDE
+.idea/
+.vscode/
