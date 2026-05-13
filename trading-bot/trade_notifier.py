@@ -1,4 +1,9 @@
 import urllib.request, json, time, os, base64
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 GROQ_KEY    = os.environ['GROQ_API_KEY']
 NTFY_SERVER = os.environ.get('NTFY_SERVER', 'http://158.180.57.245:7777')

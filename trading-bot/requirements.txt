@@ -4,3 +4,4 @@ fastapi>=0.136.0
 uvicorn[standard]>=0.30.0
 requests>=2.31.0
 stem>=1.8.2
+python-dotenv>=1.0.0
