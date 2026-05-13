@@ -36,7 +36,8 @@ class OptionsStrategy(Strategy):
         if price and price == price:  # not None, not NaN
             return price
         try:
-            import urllib.request, json
+            import urllib.request
+            import json
             url = f'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d'
             req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             data = json.loads(urllib.request.urlopen(req, timeout=8).read())

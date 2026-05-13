@@ -1,3 +1,4 @@
+import os
 import time
 import streamlit as st
 import pandas as pd
@@ -8,7 +9,7 @@ try:
 except ImportError:
     import db
 
-WEBHOOK = 'http://localhost:8080'
+WEBHOOK = os.environ.get('WEBHOOK_URL', 'http://localhost:8080')
 
 st.set_page_config(page_title='IKR Trading Dashboard', page_icon='📈', layout='wide')
 st.title('IKR Trading Dashboard')
@@ -54,11 +55,19 @@ with tab_pending:
 
                 col_a, col_b, _ = st.columns([1, 1, 4])
                 if col_a.button('✅ Approve', key=f'ap_{t["order_id"]}'):
-                    requests.post(f'{WEBHOOK}/approve/{t["order_id"]}', timeout=5)
-                    st.rerun()
+                    try:
+                        requests.post(f'{WEBHOOK}/approve/{t["order_id"]}', timeout=5)
+                    except requests.RequestException as e:
+                        st.error(f'Webhook unreachable: {e}')
+                    else:
+                        st.rerun()
                 if col_b.button('❌ Reject', key=f're_{t["order_id"]}'):
-                    requests.post(f'{WEBHOOK}/reject/{t["order_id"]}', timeout=5)
-                    st.rerun()
+                    try:
+                        requests.post(f'{WEBHOOK}/reject/{t["order_id"]}', timeout=5)
+                    except requests.RequestException as e:
+                        st.error(f'Webhook unreachable: {e}')
+                    else:
+                        st.rerun()
 
 # --- Trade history ---
 with tab_history:

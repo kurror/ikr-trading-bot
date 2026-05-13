@@ -1,12 +1,25 @@
-import sqlite3, json, time, os
+import sqlite3
+import json
+import time
+import os
+from contextlib import contextmanager
 
 DB_PATH = os.environ.get('TRADES_DB', '/tmp/trades.db')
 
 
+@contextmanager
 def _conn():
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
-    return c
+    c.execute('PRAGMA journal_mode=WAL')
+    try:
+        yield c
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
 
 
 def init_db():

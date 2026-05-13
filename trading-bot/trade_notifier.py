@@ -1,4 +1,8 @@
-import urllib.request, json, time, os, base64
+import urllib.request
+import json
+import time
+import os
+import base64
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -108,7 +112,7 @@ def get_market_sentiment(symbol):
         news_items = root.findall('.//item')[:4]
         titles = [i.find('title').text for i in news_items]
         links  = [i.find('link').text  for i in news_items]
-        sources = [f'Google News: {t[:80]} — {l}' for t, l in zip(titles, links)]
+        sources = [f'Google News: {t[:80]} — {link}' for t, link in zip(titles, links)]
         text = ' | '.join(titles)
         return sources, text, reddit_url
     except Exception:
@@ -158,7 +162,7 @@ def send_approval_request(symbol, action, qty, price, analysis, sources, reddit_
 
     # Extract verdict line for notification body
     verdict_line = next(
-        (l for l in analysis.splitlines() if l.startswith('VERDICT:')),
+        (line for line in analysis.splitlines() if line.startswith('VERDICT:')),
         analysis.splitlines()[-1] if analysis else '')
     message = f'{action} {qty} {symbol} @ USD {price}\n\n{verdict_line}'
 

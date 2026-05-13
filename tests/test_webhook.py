@@ -1,4 +1,3 @@
-import pytest
 from fastapi.testclient import TestClient
 import trading_bot.webhook as wh
 

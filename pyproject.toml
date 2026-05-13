@@ -11,11 +11,23 @@ dev = [
     "fastapi>=0.136.0",
     "httpx>=0.28.0",
     "pytest>=9.0.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.4.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v"
+addopts = "-v --cov=trading_bot --cov-report=xml:coverage.xml --cov-report=term-missing"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
 
 [build-system]
 requires = ["setuptools>=68"]
