@@ -1,399 +1,425 @@
 # IKR Trading Bot
 
-AI-driven options trading system for Interactive Brokers. Runs headlessly on Oracle Cloud free tier, sends AI-analysed trade approval requests to your Android phone, and waits for your tap before submitting any order.
+AI-driven options trading system for Interactive Brokers. Pulls multi-source sentiment via Tor, generates structured analysis with a Groq LLM, and pushes a trade approval request to your phone — you tap Approve or Reject before any order is placed.
 
-> **Supports both paper and live trading.** The system is designed to run against IBKR's simulated (paper) environment during development and validation, and against a live account once the strategy has been proven. A configurable budget cap (`MAX_PREMIUM_BUDGET`) limits total open premium exposure in both modes. Only buy-side options positions are taken — risk is always defined and capped at premium paid.
+> Supports **paper and live trading**. Start on IBKR's simulated environment, switch to a live account once the strategy is proven. Risk is always defined: the bot only buys options (calls or puts), never sells naked.
 
 ---
 
 ## Table of Contents
 
-- [Features](#features)
+- [How it works](#how-it-works)
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
-- [Infrastructure](#infrastructure)
-- [Services](#services)
+- [Setup guide](#setup-guide)
+  - [1. Oracle Cloud free tier](#1-oracle-cloud-free-tier)
+  - [2. IB Gateway](#2-ib-gateway)
+  - [3. ntfy push notifications](#3-ntfy-push-notifications)
+  - [4. Tor](#4-tor)
+  - [5. Webhook server](#5-webhook-server)
+  - [6. Lumibot strategy](#6-lumibot-strategy)
+  - [7. ARM instance (optional)](#7-arm-instance-optional)
 - [Configuration](#configuration)
-- [Usage](#usage)
+- [Strategy parameters](#strategy-parameters)
 - [Development](#development)
-- [Known Issues](#known-issues)
+- [Known issues](#known-issues)
 - [Roadmap](#roadmap)
 
 ---
 
-## Features
+## How it works
 
-- **Headless IB Gateway** via Docker (paper or live account, auto-login via IBC)
-- **Long call strategy** — finds ATM/slightly OTM call with ~30 DTE daily at market open
-- **yfinance option chain** — free option data (strikes, expiries, bid/ask mid-price); no IB data subscription needed
-- **Yahoo Finance price fallback** — spot price from Yahoo if IB delayed data fails
-- **Multi-source sentiment** via Tor (bypasses OCI IP block):
-  - WSB Due Diligence posts (`flair:DD`)
-  - r/options recent posts
-  - WSB general search
-  - Google News RSS fallback
-- **Groq** `llama-3.3-70b` structured analysis (SENTIMENT / RISK / CATALYST / VERDICT)
-- **HTML trade report** — hosted on webhook server, shows full analysis with clickable source links
-- **ntfy push notification** to Android with three action buttons:
-  - `View Report` — opens full HTML report in browser
-  - `Approve` — submits the order (paper or live)
-  - `Reject` — skips the iteration
-- First decision wins — duplicate taps are silently ignored server-side
-- Hard budget cap (`MAX_PREMIUM_BUDGET = $2,000` total open premium)
-- No naked exposure — bot only ever buys calls (defined risk = premium paid)
+```
+Market open (09:30 ET)
+  └─ Lumibot on_trading_iteration()
+      ├─ _spot_price()         IB delayed data → Yahoo Finance fallback
+      ├─ _pick_option()        yfinance chain → nearest expiry ≥ TARGET_DTE, first OTM strike
+      ├─ budget check          MAX_PREMIUM_BUDGET cap
+      ├─ get_market_sentiment()
+      │     ├─ WSB DD posts    via Tor (flair:DD, monthly lookback)
+      │     ├─ r/options posts via Tor (weekly lookback)
+      │     ├─ WSB general     via Tor (weekly lookback)
+      │     └─ Google News RSS direct fallback (always works)
+      ├─ groq_analyse()        llama-3.3-70b-versatile → SENTIMENT / RISK / CATALYST / VERDICT
+      ├─ POST /report/{id}     store HTML report on webhook server
+      └─ ntfy notification     3 buttons: [View Report] [Approve] [Reject]
+          └─ first tap wins — duplicate taps silently ignored
+              └─ Lumibot submits or skips order via IB Gateway
+```
 
 ---
 
 ## Architecture
 
 ```
-Android (Termux / ntfy app)
-  │
-  ├── SSH tunnel ──────────────► OCI instance-main (158.180.57.245)
-  │                                   │
-  └── ntfy push ◄────────────────────┤
-                                      ├── IB Gateway  :4004 (localhost only)
-                                      ├── Lumibot     (Docker)
-                                      ├── Webhook     :8080
-                                      ├── ntfy        :7777
-                                      └── Tor         :9050 (SOCKS5)
+Your machine (Linux / WSL2 / macOS)
+  └─ SSH ──────────────────────────► OCI instance-main (x86, 1 vCPU, 1 GB)
+                                           │
+                                           ├─ IB Gateway  :4004 (localhost only)
+                                           ├─ Lumibot     (Docker, Python 3.11)
+                                           ├─ Webhook     :8080  (FastAPI)
+                                           ├─ ntfy        :7777  (push server)
+                                           └─ Tor         :9050  (SOCKS5 proxy)
+                                                 │
+                                           ntfy push ──────────────► Android / iOS
+                                                                       [View Report]
+                                                                       [Approve]
+                                                                       [Reject]
 ```
 
-**Trade flow:**
+Two OCI instances are used — both **always-free**:
 
-```
-Market open (09:30 ET)
-  └─ Lumibot on_trading_iteration()
-      └─ _spot_price()           IB delayed → Yahoo Finance fallback
-      └─ _pick_call()            yfinance option chain → nearest expiry ≥ 30d, first OTM strike
-      └─ budget + position check
-      └─ get_market_sentiment()
-          ├─ WSB DD posts via Tor      (renews circuit on 429, retries)
-          ├─ r/options posts via Tor
-          ├─ WSB general via Tor
-          └─ Google News RSS fallback
-      └─ groq_analyse()          4-section structured report
-      └─ POST /report/{order_id} store HTML report on webhook
-      └─ ntfy notification → phone
-          └─ [View Report]  [Approve]  [Reject]
-              └─ first tap wins, second tap silently ignored
-                  └─ Lumibot submits or skips order
-```
+| Instance | Shape | Role |
+|---|---|---|
+| `instance-main` | VM.Standard.E2.1.Micro (1 vCPU, 1 GB RAM, x86) | Runs all services |
+| `instance-arm-trading` | VM.Standard.A1.Flex (4 OCPU, 24 GB RAM, ARM) | Heavier workloads, Lumibot migration target |
 
 ---
 
 ## Prerequisites
 
-- Oracle Cloud account (free tier)
-- Interactive Brokers account (paper for development, live for production)
-- Android phone with [ntfy app](https://ntfy.sh)
-- [Groq API key](https://console.groq.com) (free tier)
-- Termux (Android) with SSH key access to OCI
+| Requirement | Notes |
+|---|---|
+| [Oracle Cloud account](https://cloud.oracle.com) | Free tier — no credit card required for always-free resources |
+| [Interactive Brokers account](https://www.interactivebrokers.com) | Paper account for development, live for production. IBKR Pro required (not Lite) |
+| [Groq API key](https://console.groq.com) | Free tier is sufficient. See [LLM options](#llm-options) for alternatives |
+| Linux machine | Ubuntu / Debian / WSL2 / macOS recommended. Android + Termux also works |
+| [ntfy app](https://ntfy.sh) | Android (Play Store / F-Droid) or iOS (App Store) |
+
+### LLM options
+
+The bot uses [Groq](https://console.groq.com) by default (`llama-3.3-70b-versatile`) — fast inference, generous free tier. Alternatives:
+
+- **OCI Generative AI** — keeps everything inside Oracle Cloud. Supports Llama 3 and Cohere via a compatible REST API. Available in Frankfurt and Chicago regions. Replace the Groq endpoint in `groq_analyse()` with your OCI GenAI endpoint.
+- **Ollama on the ARM instance** — the 24 GB A1.Flex can run 7–13B models locally with no external API calls. Set `OLLAMA_HOST` and point `groq_analyse()` to `http://localhost:11434`.
 
 ---
 
-## Infrastructure
+## Setup guide
 
-### Compute Instances
+### 1. Oracle Cloud free tier
 
-| Name | Shape | vCPU | RAM | IP | Status |
-|---|---|---|---|---|---|
-| `instance-main` | VM.Standard.E2.1.Micro | 1 | 1 GB | `158.180.57.245` | Running |
-| `instance-arm-trading` | VM.Standard.A1.Flex | 4 (ARM) | 24 GB | pending | OCI capacity retry loop |
+#### Create instance-main (x86 micro)
 
-**ARM retry loop** (runs from Termux every 5 min via cron, self-removes on success):
+1. Sign in to [cloud.oracle.com](https://cloud.oracle.com)
+2. Compute → Instances → **Create Instance**
+3. Shape: **VM.Standard.E2.1.Micro** (Always Free)
+4. Image: Ubuntu 22.04
+5. Add your SSH public key
+6. Note the public IP — used as `YOUR_OCI_IP` throughout
+
+#### Open firewall ports
+
+OCI has two independent firewall layers — **both** must allow each port.
+
+**OCI Security List** (VCN → Security Lists → Ingress Rules):
+
+| Port | Protocol | Source CIDR |
+|---|---|---|
+| 22 | TCP | 0.0.0.0/0 |
+| 7777 | TCP | 0.0.0.0/0 |
+| 8080 | TCP | 0.0.0.0/0 |
+
+**iptables on the instance** (insert before the default REJECT rule):
 
 ```bash
-tail -20 /root/projects/ikr/retry_arm.log
+sudo iptables -I INPUT 5 -p tcp --dport 7777 -j ACCEPT
+sudo iptables -I INPUT 6 -p tcp --dport 8080 -j ACCEPT
+sudo netfilter-persistent save
 ```
 
-### Firewall
+IB Gateway ports (`4003`, `4004`, `5900`) are bound to `127.0.0.1` — never exposed externally.
 
-OCI has two independent firewall layers — both must allow a port:
+#### Install base dependencies
 
-1. **OCI Security List** (VCN-level)
-2. **iptables** on the instance (`iptables-persistent`)
+```bash
+ssh ubuntu@YOUR_OCI_IP
 
-> Insert new ACCEPT rules *before* the REJECT rule:
-> ```bash
-> sudo iptables -I INPUT 5 -p tcp --dport <PORT> -j ACCEPT
-> sudo netfilter-persistent save
-> ```
+sudo apt update && sudo apt install -y \
+  docker.io docker-compose-plugin \
+  tor python3-pip python3-venv \
+  iptables-persistent
 
-Open ports: `22` (SSH), `7777` (ntfy), `8080` (webhook).
-IB Gateway ports are bound to `127.0.0.1` only — never exposed externally.
+sudo usermod -aG docker ubuntu
+# Log out and back in for docker group to take effect
+```
 
 ---
 
-## Services
+### 2. IB Gateway
 
-All services run on `instance-main`.
-
-### IB Gateway
-
-| | |
-|---|---|
-| Image | `ghcr.io/gnzsnz/ib-gateway:stable` |
-| Mode | Paper trading |
-| API port | `127.0.0.1:4004` (via socat) |
-| Credentials | `~/ib-gateway/.env` (chmod 600) |
+Runs in Docker, handles all communication with Interactive Brokers.
 
 ```bash
-cd ~/ib-gateway && docker compose ps
+mkdir ~/ib-gateway && cd ~/ib-gateway
+# Copy docker-compose.yml and .env.example from repo
+cp .env.example .env && chmod 600 .env
+# Edit .env with your IBKR credentials
+docker compose up -d
+```
+
+**`~/ib-gateway/.env`:**
+
+```env
+TWS_USERID=your_ibkr_username
+TWS_PASSWORD=your_ibkr_password
+TRADING_MODE=paper        # change to 'live' when ready
+VNC_SERVER_PASSWORD=changeme
+```
+
+> Tip: create a secondary IBKR username for API use — website logins and API sessions can collide.
+
+```bash
+# Verify
+docker compose ps
 docker logs ib-gateway-ib-gateway-1 --tail 30
 ```
 
-### Lumibot
+**Market data:** IB paper accounts have no subscription by default (errors 10089, 10167). The strategy handles this automatically — delayed data via IB, Yahoo Finance fallback for spot price, yfinance for the full option chain.
 
-| | |
-|---|---|
-| Image | `lumibot-app:latest` (Python 3.11, built locally) |
-| Deps | `lumibot`, `yfinance` |
-| Strategy | `~/lumibot/strategy.py` — `LongCallStrategy` |
+---
+
+### 3. ntfy push notifications
+
+Self-hosted push server. Runs in Docker on port 7777.
 
 ```bash
-docker logs lumibot-test --tail 50
+mkdir ~/ntfy && cd ~/ntfy
+# Copy docker-compose.yml from repo
+# Edit NTFY_BASE_URL to http://YOUR_OCI_IP:7777
+docker compose up -d
+
+# Create user
+docker compose exec ntfy ntfy user add --role=admin trading
+# Enter and note the password — add it to trading-bot/.env
+```
+
+**Mobile setup:**
+
+1. Install [ntfy](https://ntfy.sh) from Play Store, F-Droid, or App Store
+2. Settings → Manage accounts → Add server:
+   - URL: `http://YOUR_OCI_IP:7777`
+   - Username: `trading`
+   - Password: your chosen password
+3. Subscribe to topic `trading-alerts`
+4. Android: Apps → ntfy → Battery → **Unrestricted** (prevents kill during sleep)
+
+---
+
+### 4. Tor
+
+Routes Reddit requests through residential-style exit nodes, bypassing OCI datacenter IP rate limits.
+
+```bash
+sudo systemctl enable tor@default
+sudo systemctl start tor@default
+
+# Enable control port for auto circuit renewal on HTTP 429
+echo -e "ControlPort 9051\nCookieAuthentication 1" | sudo tee -a /etc/tor/torrc
+sudo systemctl restart tor@default
+
+# Verify
+curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip
+```
+
+---
+
+### 5. Webhook server
+
+FastAPI server that stores trade reports and holds approve/reject decisions until Lumibot polls for them.
+
+```bash
+mkdir ~/trading-bot && cd ~/trading-bot
+# Copy trade_notifier.py, webhook.py, requirements.txt from repo
+
+pip3 install -r requirements.txt
+
+# Create .env from example
+cp .env.example .env && chmod 600 .env
+# Edit .env with real values
+
+# Start (survives SSH logout)
+nohup python3 -m uvicorn webhook:app --host 0.0.0.0 --port 8080 >> webhook.log 2>&1 &
+
+# Verify
+curl http://localhost:8080/decision/test
+# → {"decision":"pending"}
+```
+
+---
+
+### 6. Lumibot strategy
+
+Runs in Docker (Python 3.11), connects to IB Gateway on localhost.
+
+```bash
+mkdir ~/lumibot && cd ~/lumibot
+# Copy Dockerfile and strategy.py from repo
+
+docker build -t lumibot-app .
+
+docker run -d --name lumibot-live \
+  --network host \
+  -v ~/trading-bot:/home/ubuntu/trading-bot \
+  --env-file ~/trading-bot/.env \
+  lumibot-app
 ```
 
 **Rebuild after editing `strategy.py`:**
 
 ```bash
 cd ~/lumibot
-docker build -t lumibot-app .
-docker rm -f lumibot-test
-docker run -d --name lumibot-test \
+docker build -t lumibot-app . && \
+docker rm -f lumibot-live && \
+docker run -d --name lumibot-live \
   --network host \
-  -v /home/ubuntu/trading-bot:/home/ubuntu/trading-bot \
+  -v ~/trading-bot:/home/ubuntu/trading-bot \
   --env-file ~/trading-bot/.env \
   lumibot-app
 ```
 
-**Broker config keys** (Lumibot 4.x):
+---
 
-```python
-INTERACTIVE_BROKERS_CONFIG = {
-    'IP': '127.0.0.1',
-    'SOCKET_PORT': 4004,
-    'CLIENT_ID': '10',
-}
-```
+### 7. ARM instance (optional)
 
-**Market data note:** IB paper accounts have no market data subscription by default (error 10089/10167). The strategy handles this by:
-1. Calling `self.broker.ib.reqMarketDataType(3)` to request delayed data
-2. Falling back to Yahoo Finance for spot price if IB returns NaN
-3. Using yfinance for the full option chain (strikes, expiries, bid/ask)
-
-### ntfy (Push Notifications)
-
-| | |
-|---|---|
-| Port | `7777` |
-| Topic | `trading-alerts` |
-| Credentials | `NTFY_USER` / `NTFY_PASSWORD` (env vars) |
-
-**Android app setup:**
-
-1. Install [ntfy](https://ntfy.sh) from Play Store or F-Droid
-2. Settings → Manage accounts → Add `http://158.180.57.245:7777` with username `trading`
-3. Subscribe to topic `trading-alerts`
-4. Android → Settings → Apps → ntfy → Battery → **Unrestricted**
-
-### Webhook Server
-
-| | |
-|---|---|
-| Framework | FastAPI + uvicorn |
-| Port | `8080` |
-| Persistence | `nohup` only — **dies on reboot** |
-
-Endpoints:
-
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/approve/{order_id}` | Approve — first call wins, subsequent calls ignored |
-| `POST` | `/reject/{order_id}` | Reject — first call wins |
-| `GET` | `/decision/{order_id}` | Poll for decision |
-| `DELETE` | `/decision/{order_id}` | Clear after reading |
-| `POST` | `/report/{order_id}` | Store trade report JSON |
-| `GET` | `/report/{order_id}` | View HTML trade report |
-
-**Restart:**
+The ARM A1.Flex (4 OCPU, 24 GB) is always-free but capacity in Frankfurt is often temporarily unavailable. A retry script runs on `instance-main` (which is always on) and self-removes from cron when it succeeds.
 
 ```bash
-cd ~/trading-bot && source .env && \
-  nohup python3 -m uvicorn webhook:app --host 0.0.0.0 --port 8080 &
-```
+# On instance-main: install OCI CLI
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" --accept-all-defaults
 
-### Trade Notifier (`trade_notifier.py`)
+# Copy OCI credentials from your local machine
+scp ~/.oci/config ubuntu@YOUR_OCI_IP:~/.oci/config
+scp ~/.oci/oci_api_key.pem ubuntu@YOUR_OCI_IP:~/.oci/oci_api_key.pem
+ssh ubuntu@YOUR_OCI_IP "chmod 600 ~/.oci/oci_api_key.pem"
 
-Sentiment sources, tried in order:
+# Copy and configure retry script
+scp retry_arm.sh ubuntu@YOUR_OCI_IP:~/retry_arm.sh
+ssh ubuntu@YOUR_OCI_IP "chmod +x ~/retry_arm.sh"
+# Edit retry_arm.sh: fill in YOUR_OCI_COMPARTMENT_ID, IMAGE_ID, SUBNET_ID
 
-| Source | Method | Notes |
-|---|---|---|
-| WSB DD posts | Tor SOCKS5 | `flair:DD` filter, monthly lookback |
-| r/options posts | Tor SOCKS5 | Weekly lookback |
-| WSB general | Tor SOCKS5 | Weekly lookback |
-| Google News RSS | Direct | Always works from OCI; used as fallback |
+# Register cron on instance-main
+ssh ubuntu@YOUR_OCI_IP \
+  "(crontab -l 2>/dev/null; echo '*/5 * * * * /home/ubuntu/retry_arm.sh >> /home/ubuntu/retry_arm.log 2>&1') | crontab -"
 
-On HTTP 429 (Tor exit rate-limited): requests a new circuit via stem control port and retries once.
-
-Groq prompt produces 4 labelled lines: `SENTIMENT`, `RISK`, `CATALYST`, `VERDICT`.
-Notification body shows only the `VERDICT` line; full report is one tap away.
-
-### Tor
-
-| | |
-|---|---|
-| SOCKS5 proxy | `127.0.0.1:9050` |
-| Control port | `127.0.0.1:9051` (cookie auth) |
-| Auth cookie | `/var/run/tor/control.authcookie` |
-
-```bash
-sudo systemctl status tor@default
-curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip
+# Monitor
+ssh ubuntu@YOUR_OCI_IP "tail -f ~/retry_arm.log"
 ```
 
 ---
 
 ## Configuration
 
-### Strategy Parameters
+All secrets live in `~/trading-bot/.env` on the server. The app loads this file automatically via `python-dotenv` — no `source .env` needed.
 
-Edit `~/lumibot/strategy.py`, then rebuild:
-
-```python
-MAX_PREMIUM_BUDGET = 2000       # max total USD in open option premiums
-TARGET_DTE         = 30         # target days to expiration (e.g. 245 for Jan '27 LEAPS)
-SYMBOL             = 'UBER'     # underlying ticker
-DIRECTION          = 'bearish'  # 'bullish' → buy calls, 'bearish' → buy puts
+```env
+GROQ_API_KEY=gsk_...
+NTFY_USER=trading
+NTFY_PASSWORD=your_ntfy_password
+NTFY_SERVER=http://YOUR_OCI_IP:7777
+NTFY_TOPIC=trading-alerts
+WEBHOOK_URL=http://YOUR_OCI_IP:8080
 ```
 
-### Secrets
-
-| Secret | Env var | Notes |
+| Variable | Required | Description |
 |---|---|---|
-| IB username | `TWS_USERID` | Set in `~/ib-gateway/.env` |
-| IB password | `TWS_PASSWORD` | Set in `~/ib-gateway/.env` |
-| Groq API key | `GROQ_API_KEY` | Set in `~/trading-bot/.env` |
-| ntfy username | `NTFY_USER` | Set in `~/trading-bot/.env` |
-| ntfy password | `NTFY_PASSWORD` | Set in `~/trading-bot/.env` |
+| `GROQ_API_KEY` | Yes | [console.groq.com](https://console.groq.com) — free tier |
+| `NTFY_USER` | Yes | ntfy username |
+| `NTFY_PASSWORD` | Yes | ntfy password |
+| `NTFY_SERVER` | No | ntfy URL (default: `http://YOUR_OCI_IP:7777`) |
+| `NTFY_TOPIC` | No | Topic name (default: `trading-alerts`) |
+| `WEBHOOK_URL` | No | Webhook base URL (default: `http://YOUR_OCI_IP:8080`) |
 
-Copy `.env.example` files and fill in real values. Never commit `.env` files (covered by `.gitignore`).
-
-> **TODO:** Migrate to OCI Vault + Instance Principal.
+IB Gateway credentials go in `~/ib-gateway/.env` — separate file, separate container.
 
 ---
 
-## Usage
+## Strategy parameters
 
-### SSH into instance
+Edit `~/lumibot/strategy.py` then rebuild the Docker image:
 
-```bash
-ssh -i /root/.ssh/oci_instance_key ubuntu@158.180.57.245
-```
-
-### Check all services
-
-```bash
-docker ps --format 'table {{.Names}}\t{{.Status}}'
-ps aux | grep uvicorn
-sudo systemctl status tor@default --no-pager
-```
-
-### Send a test notification manually
-
-```bash
-cd ~/trading-bot && source .env && python3 -c "
-from trade_notifier import request_approval
-request_approval('AAPL', 'BUY CALL', 1, 710.00)
-"
-```
-
-### View paper account positions
-
-```bash
-python3 -c "
-from ib_insync import IB
-ib = IB()
-ib.connect('127.0.0.1', 4004, clientId=99)
-print(ib.positions())
-ib.disconnect()
-"
+```python
+MAX_PREMIUM_BUDGET = 2000       # max total USD in open option premiums
+TARGET_DTE         = 30         # target days to expiration (use ~245 for Jan LEAPS)
+SYMBOL             = 'UBER'     # underlying ticker
+DIRECTION          = 'bearish'  # 'bullish' → buy calls  |  'bearish' → buy puts
 ```
 
 ---
 
 ## Development
 
-### Project layout
+### Repository layout
 
 ```
 ikr/
-├─ lumibot/            Dockerfile + strategy.py (Python 3.11, runs in Docker)
-├─ trading-bot/        trade_notifier.py + webhook.py (FastAPI service)
-├─ tests/              pytest suite for the webhook server
-├─ ib-gateway/         docker-compose.yml for IB Gateway container
-├─ ntfy/               docker-compose.yml for ntfy push notification server
-├─ pyproject.toml      project metadata + pytest config + dev dependencies
-└─ Makefile            convenience targets: install · test · lint · clean
+├─ lumibot/
+│   ├─ Dockerfile          Python 3.11 image — installs lumibot + yfinance
+│   └─ strategy.py         OptionsStrategy — main trading loop (configurable direction)
+├─ trading-bot/
+│   ├─ trade_notifier.py   Sentiment fetch · Groq analysis · ntfy push · decision polling
+│   ├─ webhook.py          FastAPI — approve / reject / report endpoints
+│   ├─ requirements.txt    Runtime dependencies
+│   └─ .env.example        Required environment variables (no real secrets)
+├─ ib-gateway/
+│   ├─ docker-compose.yml  IB Gateway container
+│   └─ .env.example        IBKR credentials template
+├─ ntfy/
+│   └─ docker-compose.yml  ntfy push notification server
+├─ tests/
+│   ├─ conftest.py         autouse fixture — isolated tmp storage per test
+│   └─ test_webhook.py     14 pytest tests covering all webhook endpoints
+├─ pyproject.toml          Project metadata + dev dependencies + pytest config
+├─ Makefile                install · test · lint · clean
+└─ retry_arm.sh            ARM instance provisioning retry loop (runs on instance-main)
 ```
 
-### Running tests locally
+### Running tests
 
-Requires Python 3.11+.
+Requires Python 3.11+ on Linux, WSL2, or macOS.
 
 ```bash
-# First time: create venv and install dev dependencies
-make install
+git clone https://github.com/kurror/ikr-trading-bot.git
+cd ikr-trading-bot
 
-# Run the full test suite
-make test
-
-# Check syntax of all Python files
-make lint
+ln -sf trading-bot trading_bot   # makes package importable
+make install                     # creates .venv + installs dev deps
+make test                        # runs pytest
 ```
 
-Or without Make:
+### Webhook API reference
 
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest
-```
-
-Tests use `pytest` with `FastAPI`'s `TestClient` (backed by `httpx`). Each test runs in isolation — an `autouse` fixture in `conftest.py` redirects the JSON storage files to a temporary directory.
-
-### Adding tests
-
-Tests live in `tests/test_webhook.py`. Import the app via the `trading_bot` symlink:
-
-```python
-from fastapi.testclient import TestClient
-import trading_bot.webhook as wh
-
-client = TestClient(wh.app)
-```
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/approve/{order_id}` | First call wins; subsequent calls return `already_decided` |
+| `POST` | `/reject/{order_id}` | First call wins |
+| `GET` | `/decision/{order_id}` | Returns `{decision: approved\|rejected\|pending}` |
+| `DELETE` | `/decision/{order_id}` | Clears decision after Lumibot reads it |
+| `POST` | `/report/{order_id}` | Store trade analysis JSON |
+| `GET` | `/report/{order_id}` | Serve dark-themed HTML report with clickable source links |
 
 ---
 
-## Known Issues
+## Known issues
 
 | Issue | Workaround |
 |---|---|
-| Webhook not persistent across reboots | Manually restart; needs systemd unit |
-| Lumibot not in docker-compose | `docker restart lumibot-test`; needs compose file |
-| ARM instance still pending (OCI capacity) | Cron retry loop running every 5 min |
-| IB delayed data returns NaN for spot price | Yahoo Finance fallback handles this |
+| Webhook dies on reboot | Manually restart; systemd unit planned |
+| Lumibot not in docker-compose | `docker restart lumibot-live`; compose file planned |
+| ARM instance capacity unavailable | Retry cron running on `instance-main` every 5 min |
+| IB delayed data returns NaN | Yahoo Finance fallback handles this automatically |
 | IB options tick data unavailable (no subscription) | yfinance used for all option pricing |
+| Yahoo Finance terms restrict commercial use | Fine for paper trading; upgrade to ThetaData / Polygon for live |
 
 ---
 
 ## Roadmap
 
-- [ ] Migrate secrets to OCI Vault + Instance Principal
-- [ ] Add systemd unit for webhook server (persistence across reboots)
-- [ ] Add docker-compose for Lumibot with restart policy
+- [ ] systemd unit for webhook server (persistence across reboots)
+- [ ] docker-compose for Lumibot with restart policy
 - [ ] Migrate Lumibot to ARM instance once provisioned
-- [ ] Add test suite (unit tests for notifier/webhook, integration test for full pipeline)
-- [ ] Replace AAPL-only strategy with multi-ticker scanning
-- [ ] Add position sizing beyond single-contract orders
+- [ ] OCI Vault + Instance Principal for secret management
+- [ ] Structured audit log per trade (sources → analysis → decision → fill)
+- [ ] Multi-ticker scanning
+- [ ] Richer LLM analysis: bull/bear debate + risk agent
+- [ ] Premium data feed for live trading (ThetaData for options, Polygon for equities)
