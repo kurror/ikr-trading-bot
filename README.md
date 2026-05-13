@@ -11,6 +11,7 @@ AI-driven options trading system for Interactive Brokers. Pulls multi-source sen
 - [How it works](#how-it-works)
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
+- [AI-assisted development](#ai-assisted-development)
 - [Setup guide](#setup-guide)
   - [1. Oracle Cloud free tier](#1-oracle-cloud-free-tier)
   - [2. IB Gateway](#2-ib-gateway)
@@ -92,6 +93,105 @@ The bot uses [Groq](https://console.groq.com) by default (`llama-3.3-70b-versati
 
 - **OCI Generative AI** — keeps everything inside Oracle Cloud. Supports Llama 3 and Cohere via a compatible REST API. Available in Frankfurt and Chicago regions. Replace the Groq endpoint in `groq_analyse()` with your OCI GenAI endpoint.
 - **Ollama on the ARM instance** — the 24 GB A1.Flex can run 7–13B models locally with no external API calls. Set `OLLAMA_HOST` and point `groq_analyse()` to `http://localhost:11434`.
+
+---
+
+## AI-assisted development
+
+This project was built and is maintained almost entirely through [Claude Code](https://claude.ai/code) — Anthropic's agentic coding assistant. Claude Code runs in your terminal (or IDE via the VS Code / JetBrains extension) and can operate across your full stack: local files, git, SSH sessions, cloud APIs, and browser testing.
+
+### What an LLM can do in a project like this
+
+| Task | How |
+|---|---|
+| Write and edit code | Direct file edits — strategy logic, webhook endpoints, notifier |
+| Generate and run tests | Writes pytest suites, creates venvs, runs them, fixes failures |
+| Git workflow | Stages files, writes commit messages, pushes to GitHub |
+| SSH into OCI | Runs commands on remote instances directly over SSH |
+| Deploy code | SCP files to server, restarts services, tails logs |
+| Manage Docker | Build images, run/stop containers, read logs |
+| Install dependencies | apt, pip, OCI CLI — on local machine or remote server |
+| Manage cron jobs | Register/remove cron entries locally or on the server |
+| Rotate secrets | Change passwords, rewrite `.env`, update server config |
+| Create GitHub repos | GitHub API via curl or MCP — create, push, set visibility |
+| Research and web search | Fetches docs, reads GitHub READMEs, searches for current versions |
+| OCI infrastructure | OCI CLI — list instances, check capacity, copy credentials |
+
+### How to set it up
+
+**Install Claude Code:**
+
+```bash
+# macOS / Linux / WSL2
+npm install -g @anthropic/claude-code
+claude
+
+# Or use the VS Code extension: search "Claude Code" in the marketplace
+```
+
+**Give it SSH access to your OCI instance:**
+
+The key already lives on your machine. Claude Code runs Bash commands in your shell, so it inherits your SSH keys automatically:
+
+```bash
+# Claude Code can run this directly
+ssh -i ~/.ssh/your_oci_key ubuntu@YOUR_OCI_IP "docker ps"
+```
+
+**Give it context with `CLAUDE.md`:**
+
+Create a `CLAUDE.md` file at the repo root (or at `~/.claude/CLAUDE.md` for global context). Claude Code reads this at the start of every session. Include:
+
+- Instance IPs and SSH key paths
+- Service ports and how each service starts
+- Where secrets live
+- Any project-specific conventions
+
+Example:
+
+```markdown
+# CLAUDE.md
+
+## OCI instance-main
+- IP: YOUR_OCI_IP
+- SSH: ssh -i ~/.ssh/oci_key ubuntu@YOUR_OCI_IP
+- Services: IB Gateway (docker), ntfy (docker), webhook (nohup uvicorn), Tor (systemd)
+
+## Secrets
+- ~/trading-bot/.env — GROQ_API_KEY, NTFY_USER, NTFY_PASSWORD
+- ~/ib-gateway/.env — TWS_USERID, TWS_PASSWORD
+
+## Deploy workflow
+1. Edit locally
+2. scp file to server
+3. Restart affected service
+4. Check logs
+```
+
+**Typical session flow:**
+
+```
+You:    "Switch the strategy to UBER bearish puts, Jan '27 expiry"
+Claude: edits strategy.py → scps to server → rebuilds Docker image → tails logs
+
+You:    "Write tests for the webhook"
+Claude: writes test_webhook.py → creates venv → runs pytest → fixes failures → commits
+
+You:    "Rotate the ntfy password, don't show it to me"
+Claude: generates random password → changes it on server via docker exec →
+        writes new .env → updates trade_notifier.py → verifies it loads
+
+You:    "Push to a new public repo with no history"
+Claude: creates GitHub repo via API → orphan branch → scrubs IP/secrets →
+        single clean commit → pushes
+```
+
+### Tips
+
+- **Be specific about what you want changed** — "update the strategy" is less effective than "switch SYMBOL to UBER, DIRECTION to bearish, TARGET_DTE to 245"
+- **Let it read logs before asking why something broke** — `docker logs`, `tail -f webhook.log`, OCI CLI output all give it the context it needs
+- **Keep `CLAUDE.md` updated** — it's the fastest way to avoid re-explaining your infrastructure every session
+- **It won't commit without being asked** — changes stay local until you say so, giving you a review window
 
 ---
 
