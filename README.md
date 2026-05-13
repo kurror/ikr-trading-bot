@@ -1,8 +1,8 @@
 # IKR Trading Bot
 
-Automated paper-trading system for options on Interactive Brokers. Runs headlessly on Oracle Cloud free tier, sends AI-analysed trade approval requests to your Android phone, and waits for your tap before submitting any order.
+AI-driven options trading system for Interactive Brokers. Runs headlessly on Oracle Cloud free tier, sends AI-analysed trade approval requests to your Android phone, and waits for your tap before submitting any order.
 
-> **Paper trading only.** The bot is wired to IBKR's simulated environment and enforces a $2,000 premium budget cap. No real money is at risk.
+> **Supports both paper and live trading.** The system is designed to run against IBKR's simulated (paper) environment during development and validation, and against a live account once the strategy has been proven. A configurable budget cap (`MAX_PREMIUM_BUDGET`) limits total open premium exposure in both modes. Only buy-side options positions are taken — risk is always defined and capped at premium paid.
 
 ---
 
@@ -23,7 +23,7 @@ Automated paper-trading system for options on Interactive Brokers. Runs headless
 
 ## Features
 
-- **Headless IB Gateway** via Docker (paper account, auto-login via IBC)
+- **Headless IB Gateway** via Docker (paper or live account, auto-login via IBC)
 - **Long call strategy** — finds ATM/slightly OTM call with ~30 DTE daily at market open
 - **yfinance option chain** — free option data (strikes, expiries, bid/ask mid-price); no IB data subscription needed
 - **Yahoo Finance price fallback** — spot price from Yahoo if IB delayed data fails
@@ -36,7 +36,7 @@ Automated paper-trading system for options on Interactive Brokers. Runs headless
 - **HTML trade report** — hosted on webhook server, shows full analysis with clickable source links
 - **ntfy push notification** to Android with three action buttons:
   - `View Report` — opens full HTML report in browser
-  - `Approve` — submits the paper order
+  - `Approve` — submits the order (paper or live)
   - `Reject` — skips the iteration
 - First decision wins — duplicate taps are silently ignored server-side
 - Hard budget cap (`MAX_PREMIUM_BUDGET = $2,000` total open premium)
@@ -85,7 +85,7 @@ Market open (09:30 ET)
 ## Prerequisites
 
 - Oracle Cloud account (free tier)
-- Interactive Brokers paper account
+- Interactive Brokers account (paper for development, live for production)
 - Android phone with [ntfy app](https://ntfy.sh)
 - [Groq API key](https://console.groq.com) (free tier)
 - Termux (Android) with SSH key access to OCI
@@ -164,7 +164,7 @@ docker rm -f lumibot-test
 docker run -d --name lumibot-test \
   --network host \
   -v /home/ubuntu/trading-bot:/home/ubuntu/trading-bot \
-  -e GROQ_API_KEY=$(grep GROQ_API_KEY ~/trading-bot/.env | cut -d= -f2) \
+  --env-file ~/trading-bot/.env \
   lumibot-app
 ```
 
@@ -189,7 +189,7 @@ INTERACTIVE_BROKERS_CONFIG = {
 |---|---|
 | Port | `7777` |
 | Topic | `trading-alerts` |
-| Credentials | `trading` / `Ntfy@IKR2026` |
+| Credentials | `NTFY_USER` / `NTFY_PASSWORD` (env vars) |
 
 **Android app setup:**
 
@@ -262,17 +262,21 @@ curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip
 Edit `~/lumibot/strategy.py`, then rebuild:
 
 ```python
-MAX_PREMIUM_BUDGET = 2000   # max total USD in open option premiums
-TARGET_DTE         = 30     # target days to expiration
-SYMBOL             = 'AAPL' # underlying ticker
+MAX_PREMIUM_BUDGET = 2000       # max total USD in open option premiums
+TARGET_DTE         = 30         # target days to expiration (e.g. 245 for Jan '27 LEAPS)
+SYMBOL             = 'UBER'     # underlying ticker
+DIRECTION          = 'bearish'  # 'bullish' → buy calls, 'bearish' → buy puts
 ```
 
 ### Secrets
 
-| Secret | File | Notes |
+| Secret | Env var | Notes |
 |---|---|---|
-| IB username/password | `~/ib-gateway/.env` | `TWS_USERID`, `TWS_PASSWORD` |
-| Groq API key | `~/trading-bot/.env` | `GROQ_API_KEY=gsk_...` |
+| IB username | `TWS_USERID` | Set in `~/ib-gateway/.env` |
+| IB password | `TWS_PASSWORD` | Set in `~/ib-gateway/.env` |
+| Groq API key | `GROQ_API_KEY` | Set in `~/trading-bot/.env` |
+| ntfy username | `NTFY_USER` | Set in `~/trading-bot/.env` |
+| ntfy password | `NTFY_PASSWORD` | Set in `~/trading-bot/.env` |
 
 Copy `.env.example` files and fill in real values. Never commit `.env` files (covered by `.gitignore`).
 

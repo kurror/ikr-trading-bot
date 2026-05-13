@@ -1,10 +1,12 @@
 import urllib.request, json, time, os, base64
 
 GROQ_KEY    = os.environ['GROQ_API_KEY']
-NTFY_SERVER = 'http://158.180.57.245:7777'
-NTFY_TOPIC  = 'trading-alerts'
-NTFY_B64    = base64.b64encode(b'trading:Ntfy@IKR2026').decode()
-WEBHOOK_URL = 'http://158.180.57.245:8080'
+NTFY_SERVER = os.environ.get('NTFY_SERVER', 'http://158.180.57.245:7777')
+NTFY_TOPIC  = os.environ.get('NTFY_TOPIC', 'trading-alerts')
+NTFY_B64    = base64.b64encode(
+    f"{os.environ['NTFY_USER']}:{os.environ['NTFY_PASSWORD']}".encode()
+).decode()
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL', 'http://158.180.57.245:8080')
 TIMEOUT_SEC = 300
 TOR_PROXY   = 'socks5h://127.0.0.1:9050'
 TOR_COOKIE  = '/var/run/tor/control.authcookie'

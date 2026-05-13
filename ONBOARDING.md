@@ -149,11 +149,13 @@ pytest tests/test_webhook.py -v
 
 ## Secrets
 
-| Secret | Location | Notes |
+| Secret | Env var | Location |
 |---|---|---|
-| IB credentials | `~/ib-gateway/.env` on OCI | `TWS_USERID`, `TWS_PASSWORD` |
-| Groq API key | `~/trading-bot/.env` on OCI | `GROQ_API_KEY=gsk_...` |
-| ntfy credentials | hardcoded in `trade_notifier.py` | `trading` / `Ntfy@IKR2026` |
+| IB username | `TWS_USERID` | `~/ib-gateway/.env` on OCI |
+| IB password | `TWS_PASSWORD` | `~/ib-gateway/.env` on OCI |
+| Groq API key | `GROQ_API_KEY` | `~/trading-bot/.env` on OCI |
+| ntfy username | `NTFY_USER` | `~/trading-bot/.env` on OCI |
+| ntfy password | `NTFY_PASSWORD` | `~/trading-bot/.env` on OCI |
 
 > **TODO:** Migrate to OCI Vault + Instance Principal
 
@@ -188,7 +190,7 @@ cd ~/trading-bot && source .env && \
 cd ~/lumibot && docker build -t lumibot-app . && docker rm -f lumibot-test
 docker run -d --name lumibot-test --network host \
   -v /home/ubuntu/trading-bot:/home/ubuntu/trading-bot \
-  -e GROQ_API_KEY=$(grep GROQ_API_KEY ~/trading-bot/.env | cut -d= -f2) \
+  --env-file ~/trading-bot/.env \
   lumibot-app
 
 # Check ARM provision retry log

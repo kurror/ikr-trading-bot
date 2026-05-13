@@ -15,12 +15,13 @@ INTERACTIVE_BROKERS_CONFIG = {
 }
 
 MAX_PREMIUM_BUDGET = 2000   # max total USD spent on open option positions
-TARGET_DTE         = 30     # aim for ~30 days to expiration
-SYMBOL             = 'AAPL'
+TARGET_DTE         = 245    # Jan '27 expiry (~245 days out)
+SYMBOL             = 'UBER'
+DIRECTION          = 'bearish'  # 'bullish' = buy calls, 'bearish' = buy puts
 
 
-class LongCallStrategy(Strategy):
-    parameters = {'symbol': SYMBOL}
+class OptionsStrategy(Strategy):
+    parameters = {'symbol': SYMBOL, 'direction': DIRECTION}
 
     def initialize(self):
         self.sleeptime = '1D'
@@ -34,7 +35,6 @@ class LongCallStrategy(Strategy):
         price = self.get_last_price(Asset(symbol=symbol, asset_type='stock'))
         if price and price == price:  # not None, not NaN
             return price
-        # Fallback: Yahoo Finance (no subscription needed)
         try:
             import urllib.request, json
             url = f'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d'
@@ -44,76 +44,85 @@ class LongCallStrategy(Strategy):
         except Exception:
             return None
 
-    def _pick_call(self, underlying):
-        """Find a slightly OTM call with ~TARGET_DTE days to expiry using yfinance chain."""
+    def _pick_option(self, underlying, direction):
+        """
+        Pick an OTM option using yfinance chain.
+        bullish  → buy call, first strike >= spot
+        bearish  → buy put,  first strike <= spot (nearest OTM below)
+        Returns (expiry, strike, spot, premium, right)
+        """
         spot = self._spot_price(underlying.symbol)
         if not spot:
             self.log_message('Cannot get spot price from IB or Yahoo Finance.')
-            return None, None, None, None
+            return None, None, None, None, None
 
         try:
             import yfinance as yf
             ticker = yf.Ticker(underlying.symbol)
-            expiry_dates = ticker.options  # sorted list of 'YYYY-MM-DD' strings
+            expiry_dates = ticker.options
         except Exception as e:
             self.log_message(f'Cannot fetch option expiries from yfinance: {e}')
-            return None, None, None, None
+            return None, None, None, None, None
 
         if not expiry_dates:
             self.log_message('No option expiries returned.')
-            return None, None, None, None
+            return None, None, None, None, None
 
         target = (date.today() + timedelta(days=TARGET_DTE)).isoformat()
         future = [e for e in expiry_dates if e >= target]
         if not future:
             self.log_message('No expiry found beyond target DTE.')
-            return None, None, None, None
+            return None, None, None, None, None
         expiry_str = future[0]
         expiry = date.fromisoformat(expiry_str)
 
         try:
             chain = ticker.option_chain(expiry_str)
-            calls = chain.calls
         except Exception as e:
-            self.log_message(f'Cannot fetch call chain for {expiry_str}: {e}')
-            return None, None, None, None
+            self.log_message(f'Cannot fetch option chain for {expiry_str}: {e}')
+            return None, None, None, None, None
 
-        otm_calls = calls[calls['strike'] >= spot].sort_values('strike')
-        if otm_calls.empty:
-            self.log_message('No OTM calls available.')
-            return None, None, None, None
+        if direction == 'bearish':
+            right = 'PUT'
+            otm = chain.puts[chain.puts['strike'] <= spot].sort_values('strike', ascending=False)
+        else:
+            right = 'CALL'
+            otm = chain.calls[chain.calls['strike'] >= spot].sort_values('strike')
 
-        row = otm_calls.iloc[0]
+        if otm.empty:
+            self.log_message(f'No OTM {right}s available.')
+            return None, None, None, None, None
+
+        row = otm.iloc[0]
         strike = float(row['strike'])
-        # Use mid-price if bid/ask available, else lastPrice
         bid, ask = float(row.get('bid', 0)), float(row.get('ask', 0))
         premium = round((bid + ask) / 2 if bid and ask else float(row['lastPrice']), 2)
-        return expiry, strike, spot, premium
+        return expiry, strike, spot, premium, right
 
     def on_trading_iteration(self):
-        underlying = Asset(symbol=self.parameters['symbol'], asset_type='stock')
+        symbol    = self.parameters['symbol']
+        direction = self.parameters['direction']
+        underlying = Asset(symbol=symbol, asset_type='stock')
 
-        expiry, strike, spot, premium = self._pick_call(underlying)
+        expiry, strike, spot, premium, right = self._pick_option(underlying, direction)
         if not expiry:
             return
 
-        call = Asset(
-            symbol=self.parameters['symbol'],
+        option = Asset(
+            symbol=symbol,
             asset_type='option',
             expiration=expiry,
             strike=strike,
-            right='CALL',
+            right=right,
         )
 
-        # Check existing open call positions — never add to losers, avoid duplicates
-        existing = self.get_position(call)
+        existing = self.get_position(option)
         if existing:
-            self.log_message(f'Already holding {call}. Skipping.')
+            self.log_message(f'Already holding {option}. Skipping.')
             return
 
         cost = round(premium * 100, 2)
 
-        # Budget check: total open option value vs cap
         portfolio_value = self.get_portfolio_value()
         cash = self.get_cash()
         invested = portfolio_value - cash
@@ -124,19 +133,20 @@ class LongCallStrategy(Strategy):
             return
 
         dte = (expiry - date.today()).days
-        desc = (f'CALL  strike ${strike}  expiry {expiry} ({dte}d)  '
+        action = f'BUY {right}'
+        desc = (f'{right}  strike ${strike}  expiry {expiry} ({dte}d)  '
                 f'premium ~${cost:.0f}  spot ${spot:.2f}')
         self.log_message(f'Candidate: {desc}')
 
         approved = request_approval(
-            symbol=self.parameters['symbol'],
-            action='BUY CALL',
+            symbol=symbol,
+            action=action,
             qty=1,
             price=cost,
         )
 
         if approved:
-            order = self.create_order(call, 1, 'buy')
+            order = self.create_order(option, 1, 'buy')
             self.submit_order(order)
             self.log_message(f'Order submitted: {desc}')
         else:
@@ -144,7 +154,7 @@ class LongCallStrategy(Strategy):
 
 
 broker = InteractiveBrokers(INTERACTIVE_BROKERS_CONFIG)
-strategy = LongCallStrategy(broker=broker)
+strategy = OptionsStrategy(broker=broker)
 trader = Trader()
 trader.add_strategy(strategy)
 trader.run_all()
